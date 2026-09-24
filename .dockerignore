@@ -1,0 +1,66 @@
+# Docker 构建忽略列表 — 减小镜像构建上下文体积
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+agent4ml.egg-info/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 运行时数据（容器内自行生成，不从宿主机复制）
+.agent4ml/
+
+# 用户 skill（容器内通过 volume 挂载，不打入镜像）
+skills/
+
+# 本地设计文档与 spec（不进镜像）
+design_docs/
+openspec/
+open_spec/
+
+# Codemaker / agent 工具配置
+.codemaker/
+.codex/
+.agents/
+.claude/
+
+# Git
+.git/
+.gitignore
+
+# Docker 自身（避免递归构建上下文）
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 文档与许可（镜像内不需要）
+*.md
+LICENSE
+THIRD_PARTY_LICENSES.md
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 环境变量（敏感，不打入镜像，通过 env_file/volume 注入）
+.env

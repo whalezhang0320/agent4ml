@@ -1,0 +1,82 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+agent4ml.egg-info/
+build/
+dist/
+.eggs/
+*.whl
+
+# === Virtual environments ===
+venv/
+.venv/
+env/
+ENV/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === Locally installed tooling (skills, CLI plugins) ===
+.codex/
+.codex
+.agents/
+
+# === User skill storage (uploaded/user skills, multi-user isolation) ===
+# 核心系统 skill 在 agent4ml/backend/agents/skill/builtin_skills/（随包提交）
+# skills/ 是用户上传存储位，不追踪；多用户结构 skills/users/{user_id}/{name}/
+skills/
+# .skill_id sidecar 是 generated artifact（IMPORTED/EVOLVED），不追踪；
+# BUILTIN 核心 skill 用确定性 id 无 sidecar
+.skill_id
+
+# === Test / coverage cache ===
+.pytest_cache/
+.pytest-workspace-tmp/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# === Agent4ML runtime (logs, artifacts, generated output) ===
+.agent4ml/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === Design docs & OpenSpec specs (local only, not for public repo) ===
+design_docs/
+openspec/
+open_spec/
+
+# === Secrets (local only, never commit) ===
+.env
+.env.local
+.env.*.local
+*.secret
+credentials.json
+
+# === Temporary files ===
+*.tmp
+*.bak
+*.log
+.codemap/
+.codemaker/codemap/
+.codemaker/codeindex/
+.codemaker/rules/codemap.mdc
+.codemaker/mcps.json
+.codemaker/hooks.json
+.claude/skills/codemap-*/
+.claude/skills/code-index-*/
+.claude/settings.local.json
+opencode.json

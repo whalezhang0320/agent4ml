@@ -1,0 +1,62 @@
+[project]
+name = "agent4ml"
+version = "0.1.0"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.2.3",
+    "langchain-openai>=1.1.7",
+    "langchain-deepseek>=1.0.1",
+    "openai>=1.0.0",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.0.0",
+    "langchain-mcp-adapters>=0.1.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    "textual>=0.40.0",
+    "ddgs>=9.0.0",
+    "pyyaml>=6.0",
+    "fastapi>=0.115.0",
+    "redis>=5.0.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.scripts]
+agent4ml = "agent4ml.backend.app.cli.main:main"
+agent4ml-ml-api = "agent4ml.backend.app.ml_service.cli:api_main"
+agent4ml-ml-worker = "agent4ml.backend.app.ml_service.cli:worker_main"
+agent4ml-ml-eval = "agent4ml.backend.agents.ml_research.failure_eval:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent4ml*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.4",
+]
+docker = [
+    "agent-sandbox>=0.0.19",
+]
+anthropic = [
+    "langchain-anthropic>=0.3.0",
+]
+gemini = [
+    "langchain-google-genai>=2.0.0",
+]
+ollama = [
+    "langchain-ollama>=0.3.0",
+]
+providers = [
+    "langchain-anthropic>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "langchain-ollama>=0.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.4",
+]

@@ -1,0 +1,56 @@
+# Agent4ML docker-compose — 一键启动深度研究 Agent
+#
+# 用法:
+#   docker compose run --rm agent4ml              # TUI 交互（首次会启动配置向导）
+#   docker compose run --rm agent4ml cli          # 传统 CLI 滚动模式
+#   docker compose run --rm agent4ml run "问题"   # 单次研究
+#
+# 配置:
+#   1. 首次运行容器内会触发配置向导（生成 /app/.env）
+#   2. 或在宿主机项目根创建 .env，通过 env_file 注入
+#
+# 数据持久化:
+#   .agent4ml/ → /app/.agent4ml（DB、日志、artifact、memory、MCP 配置）
+#   skills/  → /app/skills（用户上传 skill）
+#
+# Sandbox:
+#   容器内默认 Local sandbox（AGENT4ML_SANDBOX_EXECUTOR=local）。
+#   如需 Docker 隔离 sandbox，取消下方 docker.sock 挂载注释 + 改 .env:
+#     AGENT4ML_SANDBOX_USE=agent4ml.backend.agents.sandbox.docker.docker_sandbox_provider:DockerSandboxProvider
+#     AGENT4ML_SANDBOX_EXECUTOR=local
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - agent4ml-redis:/data
+
+  agent4ml:
+    build: .
+    image: agent4ml:latest
+    container_name: agent4ml
+    stdin_open: true      # 交互式输入
+    tty: true             # 终端色彩 + TUI 全屏
+    env_file:
+      - path: .env        # 宿主机 .env（不存在则忽略）
+        required: false
+    environment:
+      # 容器内默认开启 memory + multiagent（可被 .env 覆盖）
+      - AGENT4ML_MEMORY_USE=default
+      - AGENT4ML_MEMORY_PHASE2_ENABLED=true
+      - AGENT4ML_MULTIAGENT_ENABLED=true
+    volumes:
+      - ./.agent4ml:/app/.agent4ml   # 运行时数据持久化（DB/logs/memory/artifacts）
+      - ./skills:/app/skills     # 用户 skill 持久化
+      - ./.env:/app/.env         # .env 持久化（Ctrl+B 面板可写回）
+      # Docker sandbox 模式：挂载宿主机 docker.sock（Linux/Mac）
+      # - /var/run/docker.sock:/var/run/docker.sock
+    # 默认无 command，走 ENTRYPOINT 的 agent4ml（TUI 模式）
+    # 覆盖示例: docker compose run --rm agent4ml cli
+    #           docker compose run --rm agent4ml run "研究问题"
+
+volumes:
+  agent4ml-redis:

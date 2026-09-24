@@ -1,0 +1,5 @@
+mode: fast
+plan_enabled: false
+max_loop_steps: 1
+tool_search_default: false
+save_artifact: false
