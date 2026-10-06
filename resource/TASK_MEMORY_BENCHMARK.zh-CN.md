@@ -54,3 +54,33 @@ agent4ml-task-memory-bench --repeats 3
 - `traceability_rate`：工具结果是否仍有可用的消息路径或 Graph → Event → Ref 链路。
 
 `replay_wall_ms` 不包含真实 LLM 或网络调用，因此不能直接解释为线上响应速度。真实端到端提速需要在下一层 live benchmark 中记录每次模型调用的 usage 和 latency。
+
+## 在线三组对照评测
+
+在线评测固定运行 5 个案例，每个案例 16 轮，对比：
+
+- `full_history`：保留完整历史；
+- `legacy_summary`：旧的 LLM 摘要压缩；
+- `task_memory`：当前任务图、证据引用和确定性投影方案。
+
+三组共用同一个模型、temperature、系统提示词、用户问题、轮次、实验窗口和最大输出长度。内部摘要调用也使用同一模型配置，并计入 token 和耗时。默认参数为 `deepseek-chat`、temperature `0`、24k 实验窗口和 256 最大输出 token：
+
+```bash
+.venv/bin/python -m agent4ml.backend.benchmarks.task_memory_live \
+  --provider deepseek \
+  --model deepseek-chat \
+  --temperature 0 \
+  --window 24000 \
+  --max-output-tokens 256 \
+  --concurrency 3
+```
+
+在线任务按案例和变体分别落盘；中断后可对同一个输出目录使用 `--resume`，已成功的任务不会重复计费。最终目录包含：
+
+- `manifest.json`：公平性参数和系统提示词；
+- `fixtures.json`：全部固定问题与证据；
+- `runs.jsonl`：15 个运行的原始指标；
+- `summary.json` / `summary.md`：最终对比和验收结论；
+- `runs/<case>/<variant>/`：逐轮输出、摘要快照或任务记忆证据。
+
+验收会检查 5×3×16=240 次主回答、参数一致性、问题哈希一致性、实际输入不超过实验窗口、响应完整性，以及当前方案 32 条工具证据的图和引用完整性。
