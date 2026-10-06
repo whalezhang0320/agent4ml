@@ -20,6 +20,7 @@ class BudgetTrackerExecutor:
         d["warned"] = False
         d["p1_completed"] = False
         d["p1_skip_until_fraction"] = 0.0
+        d["p4_skip_until_fraction"] = 0.0
         g["default"] = d
         return g
 
@@ -54,6 +55,8 @@ class BudgetTrackerExecutor:
             pending.append("P1")
         if fraction >= self._thresholds["p2_thinking"]:
             pending.append("P2")
+        if fraction >= self._thresholds["p3_observations"]:
+            pending.append("P3")
         if fraction >= self._thresholds["p4_summarize"]:
             pending.append("P4")
         if fraction >= self._thresholds["p5_stop_toolcall"]:
@@ -68,7 +71,10 @@ class BudgetTrackerExecutor:
     def clear_run_state(self, governance: dict | None) -> dict:
         g = dict(governance or {})
         d = dict(g.get("default") or {})
-        for k in ("budget", "seen_msgs", "pending", "warned", "p1_completed", "p1_skip_until_fraction"):
+        for k in (
+            "budget", "seen_msgs", "pending", "warned", "p1_completed",
+            "p1_skip_until_fraction", "p4_skip_until_fraction",
+        ):
             d.pop(k, None)
         g["default"] = d
         return g

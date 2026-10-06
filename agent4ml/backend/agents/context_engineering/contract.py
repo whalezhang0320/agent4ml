@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
+from agent4ml.backend.agents.task_memory.models import FlushReceipt
+
 
 @dataclass(frozen=True)
 class GovernanceContext:
@@ -87,10 +89,14 @@ class GovernanceStrategy(Protocol):
 
 @runtime_checkable
 class MemorySink(Protocol):
-    """短期治理層與長期記憶層邊界接口。策略壓縮丟棄消息前可調 flush。"""
+    """短期治理层与任务记忆层边界接口。
 
-    def flush(self, messages_to_drop: list) -> None: ...
-    async def aflush(self, messages_to_drop: list) -> None: ...
+    调用方只能在回执覆盖待处理消息且 ``safe_to_drop`` 为真时缩短或删除
+    对应消息；仅写出一个文件不构成提交成功。
+    """
+
+    def flush(self, messages_to_drop: list) -> FlushReceipt: ...
+    async def aflush(self, messages_to_drop: list) -> FlushReceipt: ...
 
 
 def merge_metrics_into_governance(

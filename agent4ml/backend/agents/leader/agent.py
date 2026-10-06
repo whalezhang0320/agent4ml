@@ -88,6 +88,15 @@ class LeaderAgent:
                 "output_dir": str(run_context.output_dir),
                 "plan_enabled": run_context.config.runtime.plan_enabled,
                 "timezone": run_context.config.runtime.timezone,
+                "task_memory_enabled": run_context.config.context_governance.params.get(
+                    "task_memory_enabled", True
+                ),
+                "task_memory_dir": run_context.config.context_governance.params.get(
+                    "task_memory_dir", ".agent4ml/task_memory"
+                ),
+                "task_memory_read_max_chars": run_context.config.context_governance.params.get(
+                    "task_memory_read_max_chars", 24_000
+                ),
                 # 取实际模型的路由 provider 名（FallbackChatModel 的 provider_names），非 config 静态值
                 "model": _resolve_actual_model_name(self.capability_registry),
             },

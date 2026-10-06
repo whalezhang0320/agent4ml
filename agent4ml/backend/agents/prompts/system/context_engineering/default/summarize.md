@@ -98,4 +98,6 @@ After compression, verify the following are preserved (if present, cannot lose):
 
 If any item is missing, supplement before outputting.
 
-## Conversation to Compress
+## Conversation to Compress（对话历史）
+
+${messages_text}

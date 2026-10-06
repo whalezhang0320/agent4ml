@@ -20,6 +20,16 @@ def test_externalize_dir_relative_resolved_to_project_root() -> None:
     assert "externalize_dir" not in config.context_governance.params
 
 
+def test_task_memory_and_snapshot_dirs_resolve_to_project_root() -> None:
+    config = load_config()
+    resolved = _resolve_relative_paths(config)
+    params = resolved.context_governance.params
+    assert Path(params["task_memory_dir"]).is_absolute()
+    assert Path(params["snapshot_dir"]).is_absolute()
+    assert Path(params["task_memory_dir"]).is_relative_to(_PROJECT_ROOT)
+    assert Path(params["snapshot_dir"]).is_relative_to(_PROJECT_ROOT)
+
+
 def test_externalize_dir_absolute_preserved() -> None:
     """已是绝对路径的 externalize_dir 不被改写（用户自定义位置时尊重）。"""
     custom = Path("/tmp/my_externalized").resolve()

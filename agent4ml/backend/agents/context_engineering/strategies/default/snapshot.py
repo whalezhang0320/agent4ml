@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from typing import Any
@@ -80,11 +81,24 @@ class SnapshotExecutor:
         try:
             abs_dir = os.path.abspath(self._dir)
             os.makedirs(abs_dir, exist_ok=True)
-            ts = datetime.now(CST).strftime("%Y%m%d_%H%M%S")
+            ts = datetime.now(CST).strftime("%Y%m%d_%H%M%S_%f")
             filename = f"snapshot-{ts}.json"
             filepath = os.path.join(abs_dir, filename)
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(snapshot, f, ensure_ascii=False, indent=2, default=str)
+            fd, temp_path = tempfile.mkstemp(prefix=".snapshot-", suffix=".tmp", dir=abs_dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(snapshot, f, ensure_ascii=False, indent=2, default=str)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, filepath)
+                dir_fd = os.open(abs_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             return filepath
         except (OSError, TypeError) as exc:
             logger.error("snapshot write failed: %s (dir=%s, type=%s)", exc, self._dir, type(exc).__name__)

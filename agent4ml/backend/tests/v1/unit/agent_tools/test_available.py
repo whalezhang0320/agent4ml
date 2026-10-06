@@ -36,6 +36,7 @@ def test_tool_group_deferred() -> None:
 def test_core_tool_names_contains_basics() -> None:
     assert "web_search" in CORE_TOOL_NAMES
     assert "browse_page" in CORE_TOOL_NAMES
+    assert "task_memory_read" in CORE_TOOL_NAMES
 
 
 def test_get_available_tools_groups_none_returns_all(monkeypatch) -> None:

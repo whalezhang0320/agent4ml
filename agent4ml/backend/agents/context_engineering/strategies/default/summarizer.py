@@ -14,6 +14,7 @@ from agent4ml.backend.agents.middlewares.tagged_context_middleware import (
 )
 
 if TYPE_CHECKING:
+    from agent4ml.backend.agents.context_engineering.contract import MemorySink
     from agent4ml.backend.agents.context_engineering.strategies.default.externalizer import ExternalizerExecutor
 
 
@@ -24,20 +25,72 @@ class SummarizerExecutor:
         self._model = model
         self._preserve_recent = preserve_recent
 
-    def summarize_if_pending(self, governance: dict | None, messages: list, externalizer: ExternalizerExecutor) -> GovernanceResult | None:
+    def summarize_if_pending(
+        self,
+        governance: dict | None,
+        messages: list,
+        externalizer: ExternalizerExecutor,
+        memory_sink: MemorySink | None = None,
+    ) -> GovernanceResult | None:
         governance = governance or {}
         pending = (governance.get("default") or {}).get("pending") or []
         if "P4" not in pending:
             return None
-        if not self._model:
-            return None
         to_summarize, preserved = self._partition(messages)
         if not to_summarize:
+            return None
+        if memory_sink is not None:
+            # Migration-safe graph mode: persist every old ToolMessage first, then
+            # only shorten messages covered by the receipt. User/assistant history
+            # stays intact until the graph has a first-class message checkpoint
+            # event; using REMOVE_ALL_MESSAGES here would lose user constraints.
+            tool_candidates = [
+                message for message in to_summarize
+                if isinstance(message, ToolMessage)
+            ]
+            receipt = memory_sink.flush(tool_candidates)
+            if not receipt.safe_to_drop:
+                return GovernanceResult(
+                    state_patch={
+                        "governance": self._update_task_memory_checkpoint(
+                            governance, receipt, failed=True
+                        )
+                    }
+                )
+            required_ids = {
+                str(message.id)
+                for message in tool_candidates
+                if message.id
+            }
+            if not required_ids.issubset(set(receipt.persisted_message_ids)):
+                return GovernanceResult(
+                    state_patch={
+                        "governance": self._update_task_memory_checkpoint(
+                            governance, receipt, failed=True
+                        )
+                    }
+                )
+            rewritten = [
+                replacement
+                for message in tool_candidates
+                if (replacement := externalizer.rewrite_from_receipt(message, receipt))
+                is not None
+            ]
+            return GovernanceResult(
+                state_patch={
+                    "governance": self._update_task_memory_checkpoint(
+                        governance, receipt, failed=False
+                    )
+                },
+                messages_patch=rewritten or None,
+            )
+        if not self._model:
             return None
         externalized_paths = self._externalize_orphans(to_summarize, externalizer)
         summary_text = self._call_llm(to_summarize)
         if summary_text is None:
-            summary_text = "压缩失败，保留最近对话。"
+            # Never delete history when the summary model failed.
+            return None
         if externalized_paths:
             summary_text += "\n\n外化工具结果：" + ", ".join(externalized_paths)
         summary_msg = HumanMessage(content=summary_text, additional_kwargs={AGENT4ML_SUMMARY: True})
@@ -143,5 +196,27 @@ class SummarizerExecutor:
         metrics = dict(d.get("metrics") or {})
         metrics["summarize_count"] = metrics.get("summarize_count", 0) + 1
         d["metrics"] = metrics
+        g["default"] = d
+        return g
+
+    @staticmethod
+    def _update_task_memory_checkpoint(
+        governance: dict, receipt: Any, *, failed: bool
+    ) -> dict:
+        g = dict(governance or {})
+        d = dict(g.get("default") or {})
+        metrics = dict(d.get("metrics") or {})
+        if failed:
+            metrics["task_memory_flush_failures"] = (
+                metrics.get("task_memory_flush_failures", 0) + 1
+            )
+            d["task_memory_error"] = "; ".join(receipt.errors)
+        else:
+            metrics["task_memory_checkpoints"] = (
+                metrics.get("task_memory_checkpoints", 0) + 1
+            )
+            d.pop("task_memory_error", None)
+        d["metrics"] = metrics
+        d["task_memory_graph_version"] = receipt.graph_version
         g["default"] = d
         return g

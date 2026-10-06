@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -28,6 +29,13 @@ from agent4ml.backend.agents.context_engineering.strategies.default.summarizer i
 )
 from agent4ml.backend.agents.context_engineering.utilities import resolve_window_size
 from agent4ml.backend.agents.middlewares.tagged_context_middleware import AGENT4ML_THINKING
+from agent4ml.backend.agents.middlewares.run_journal_middleware import _get_runtime_value
+from agent4ml.backend.agents.task_memory.integration import (
+    TASK_MEMORY_READ_TOOL_NAME,
+    TaskMemoryService,
+    iter_tool_messages,
+    replace_tool_messages,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,20 +76,28 @@ class DefaultStrategy:
         self._snapshot = SnapshotExecutor(
             snapshot_dir=params.get("snapshot_dir", ".agent4ml/snapshots"),
         )
+        self._task_memory: TaskMemoryService | None = None
+        if params.get("task_memory_enabled", True):
+            self._task_memory = TaskMemoryService(
+                params.get("task_memory_dir", ".agent4ml/task_memory"),
+                projection_max_chars=params.get("task_memory_projection_max_chars", 12_000),
+            )
 
     def before_agent(self, ctx: GovernanceContext) -> GovernanceResult:
         governance = self._budget.init_budget(ctx.governance)
-        return GovernanceResult(state_patch={"governance": governance})
+        governance, pointer = self._checkpoint_task_memory(ctx, governance)
+        return GovernanceResult(state_patch=self._state_patch(governance, pointer))
 
     async def abefore_agent(self, ctx: GovernanceContext) -> GovernanceResult:
-        return self.before_agent(ctx)
+        return await asyncio.to_thread(self.before_agent, ctx)
 
     def after_agent(self, ctx: GovernanceContext) -> GovernanceResult:
-        governance = self._budget.clear_run_state(ctx.governance)
-        return GovernanceResult(state_patch={"governance": governance})
+        governance, pointer = self._checkpoint_task_memory(ctx, ctx.governance or {})
+        governance = self._budget.clear_run_state(governance)
+        return GovernanceResult(state_patch=self._state_patch(governance, pointer))
 
     async def aafter_agent(self, ctx: GovernanceContext) -> GovernanceResult:
-        return self.after_agent(ctx)
+        return await asyncio.to_thread(self.after_agent, ctx)
 
     def before_model(self, ctx: GovernanceContext) -> GovernanceResult:
         # 防御性配对校验：送 LLM 前确保 AIMessage(tool_calls) 都有配对 ToolMessage。
@@ -90,7 +106,15 @@ class DefaultStrategy:
         if pairing_patch:
             logger.warning("pairing 补全：%d 个缺失 ToolMessage", len(pairing_patch))
 
-        governance = ctx.governance or {}
+        governance, task_pointer = self._checkpoint_task_memory(
+            ctx, ctx.governance or {}
+        )
+        task_memory_required = (
+            self._task_memory is not None and self._has_thread_identity(ctx)
+        )
+        memory_sink = self._task_memory.bind(ctx) if (
+            self._task_memory is not None and task_pointer is not None
+        ) else None
         d = governance.get("default") or {}
         pending = d.get("pending") or []
         fraction = (d.get("budget") or {}).get("fraction", 0.0)
@@ -107,23 +131,77 @@ class DefaultStrategy:
             logger.info("compaction P3 observations top-N=%d (total=%d, fraction=%.2f)", p3_limit, obs_count, fraction)
             self._emit_trace(ctx, "triggered", "P3", obs_limit=p3_limit, obs_total=obs_count, fraction=fraction)
 
-        if "P4" in pending:
+        p4_skip_until = d.get("p4_skip_until_fraction", 0.0)
+        p4_suppressed = "P4" in pending and fraction < p4_skip_until
+        if p4_suppressed:
+            logger.info(
+                "compaction P4 skipped (interval suppression): fraction=%.2f < skip_until=%.2f",
+                fraction,
+                p4_skip_until,
+            )
+            self._emit_trace(
+                ctx,
+                "skipped",
+                "P4",
+                reason="interval_suppression",
+                fraction=fraction,
+            )
+
+        if "P4" in pending and not p4_suppressed:
             logger.info("compaction P4 summarize 触发 fraction=%.2f", fraction)
             self._emit_trace(ctx, "triggered", "P4", fraction=fraction, window=(d.get("budget") or {}).get("window", 0), pending=pending)
-            snapshot_gov = self._snapshot.snapshot_if_pending(ctx.governance, ctx.messages or [], ctx.state)
-            effective_gov = snapshot_gov or ctx.governance
-            result = self._summarizer.summarize_if_pending(effective_gov, ctx.messages or [], self._externalizer)
+            if task_memory_required and task_pointer is None:
+                logger.error("P4 task-memory checkpoint failed; preserving original context")
+                return GovernanceResult(
+                    state_patch=self._state_patch(governance, task_pointer),
+                    messages_patch=pairing_patch,
+                )
+            snapshot_gov = self._snapshot.snapshot_if_pending(
+                governance, ctx.messages or [], ctx.state
+            )
+            if snapshot_gov is None:
+                logger.error("P4 snapshot failed; preserving original context")
+                return GovernanceResult(
+                    state_patch=self._state_patch(governance, task_pointer),
+                    messages_patch=pairing_patch,
+                )
+            result = self._summarizer.summarize_if_pending(
+                snapshot_gov,
+                ctx.messages or [],
+                self._externalizer,
+                memory_sink=memory_sink,
+            )
             self._emit_trace(ctx, "completed", "P4", fraction_after=fraction)
             if result is not None:
+                state_patch = dict(result.state_patch or {})
+                result_governance = dict(
+                    state_patch.get("governance") or snapshot_gov
+                )
+                result_default = dict(result_governance.get("default") or {})
+                result_default["p4_skip_until_fraction"] = fraction + 0.10
+                result_governance["default"] = result_default
+                state_patch["governance"] = result_governance
+                if task_pointer is not None:
+                    state_patch["task_memory"] = task_pointer
                 # 合并 pairing_patch 进 compaction result
                 if pairing_patch:
                     combined_msgs = (result.messages_patch or []) + pairing_patch
                     return GovernanceResult(
-                        state_patch=result.state_patch,
+                        state_patch=state_patch,
                         messages_patch=combined_msgs,
                         jump_to=result.jump_to,
                     )
-                return result
+                return GovernanceResult(
+                    state_patch=state_patch or None,
+                    messages_patch=result.messages_patch,
+                    metrics=result.metrics,
+                    jump_to=result.jump_to,
+                )
+            # Summary/checkpoint failure is fail-closed: keep all original messages.
+            return GovernanceResult(
+                state_patch=self._state_patch(snapshot_gov, task_pointer),
+                messages_patch=pairing_patch,
+            )
 
         if "P1" in pending:
             # 间隔抑制：fraction 未涨超 p1_skip_until_fraction → 跳过
@@ -134,7 +212,15 @@ class DefaultStrategy:
             else:
                 logger.info("compaction P1 externalize 触发 fraction=%.2f", fraction)
                 self._emit_trace(ctx, "triggered", "P1", fraction=fraction, pending=pending)
-                messages_patch = self._externalizer.externalize_history(ctx.messages or [])
+                if task_memory_required and memory_sink is None:
+                    logger.error("P1 task-memory checkpoint failed; preserving tool results")
+                    return GovernanceResult(
+                        state_patch=self._state_patch(governance, task_pointer),
+                        messages_patch=pairing_patch,
+                    )
+                messages_patch = self._externalizer.externalize_history(
+                    ctx.messages or [], memory_sink=memory_sink
+                )
                 ext_count = len(messages_patch) if messages_patch else 0
                 self._emit_trace(ctx, "completed", "P1", externalized_count=ext_count, fraction_after=fraction)
                 # 更新间隔抑制 flag
@@ -147,26 +233,30 @@ class DefaultStrategy:
                     if pairing_patch:
                         messages_patch = messages_patch + pairing_patch
                     return GovernanceResult(
-                        state_patch={"governance": governance},
+                        state_patch=self._state_patch(governance, task_pointer),
                         messages_patch=messages_patch,
                     )
                 # P1 执行但无可外化内容 → 更新 governance 后继续检查 pairing_patch
                 logger.info("compaction P1 completed (no externalizable content, p1_completed=True)")
                 if pairing_patch:
                     return GovernanceResult(
-                        state_patch={"governance": governance},
+                        state_patch=self._state_patch(governance, task_pointer),
                         messages_patch=pairing_patch,
                     )
-                return GovernanceResult(state_patch={"governance": governance})
+                return GovernanceResult(
+                    state_patch=self._state_patch(governance, task_pointer)
+                )
 
         # 无 compaction 触发，仅返 pairing 补全 + P3 governance 更新（若有）
         if pairing_patch:
             return GovernanceResult(
-                state_patch={"governance": governance} if "P3" in pending else None,
+                state_patch=self._state_patch(governance, task_pointer),
                 messages_patch=pairing_patch,
             )
-        if "P3" in pending:
-            return GovernanceResult(state_patch={"governance": governance})
+        if "P3" in pending or task_pointer is not None:
+            return GovernanceResult(
+                state_patch=self._state_patch(governance, task_pointer)
+            )
         return GovernanceResult()
 
     @staticmethod
@@ -240,7 +330,7 @@ class DefaultStrategy:
         return None
 
     async def abefore_model(self, ctx: GovernanceContext) -> GovernanceResult:
-        return self.before_model(ctx)
+        return await asyncio.to_thread(self.before_model, ctx)
 
     def after_model(self, ctx: GovernanceContext) -> GovernanceResult:
         messages = ctx.messages or []
@@ -341,6 +431,33 @@ class DefaultStrategy:
 
     def wrap_tool_call(self, ctx: GovernanceContext) -> GovernanceResult:
         tool_result = ctx.tool_result
+        tool_call = getattr(ctx.tool_call_request, "tool_call", None) or {}
+        # This tool only expands state/evidence already protected by the same task-memory
+        # store. Re-ingesting its output would duplicate refs and, for read_ref, immediately
+        # replace the requested evidence with another short receipt.
+        if tool_call.get("name") == TASK_MEMORY_READ_TOOL_NAME:
+            return GovernanceResult()
+        if self._task_memory is not None and self._has_thread_identity(ctx):
+            replacements: dict[int, ToolMessage] = {}
+            for message in iter_tool_messages(tool_result):
+                receipt = self._task_memory.persist_tool_message(
+                    ctx, message, tool_call=tool_call
+                )
+                if not receipt.safe_to_drop:
+                    logger.error(
+                        "task-memory commit failed for tool_call_id=%s: %s",
+                        message.tool_call_id,
+                        receipt.errors,
+                    )
+                    continue
+                rewritten = self._externalizer.rewrite_from_receipt(message, receipt)
+                if rewritten is not None:
+                    replacements[id(message)] = rewritten
+            if replacements:
+                return GovernanceResult(
+                    request_override=replace_tool_messages(tool_result, replacements)
+                )
+            return GovernanceResult()
         if isinstance(tool_result, ToolMessage):
             rewritten = self._externalizer.externalize_if_needed(tool_result)
             if rewritten is not None:
@@ -348,4 +465,42 @@ class DefaultStrategy:
         return GovernanceResult()
 
     async def awrap_tool_call(self, ctx: GovernanceContext) -> GovernanceResult:
-        return self.wrap_tool_call(ctx)
+        return await asyncio.to_thread(self.wrap_tool_call, ctx)
+
+    def _checkpoint_task_memory(
+        self, ctx: GovernanceContext, governance: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if self._task_memory is None or not self._has_thread_identity(ctx):
+            return governance, None
+        receipt, projection = self._task_memory.checkpoint(ctx)
+        g = dict(governance or {})
+        d = dict(g.get("default") or {})
+        metrics = dict(d.get("metrics") or {})
+        if receipt.safe_to_drop and projection is not None:
+            d["task_memory_projection"] = projection
+            d["task_memory_graph_version"] = receipt.graph_version
+            d.pop("task_memory_error", None)
+            metrics["task_memory_graph_version"] = receipt.graph_version
+            pointer = receipt.pointer()
+        else:
+            d["task_memory_error"] = "; ".join(receipt.errors)
+            metrics["task_memory_validation_failures"] = (
+                metrics.get("task_memory_validation_failures", 0) + 1
+            )
+            pointer = None
+        d["metrics"] = metrics
+        g["default"] = d
+        return g, pointer
+
+    @staticmethod
+    def _state_patch(
+        governance: dict[str, Any], pointer: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        patch: dict[str, Any] = {"governance": governance}
+        if pointer is not None:
+            patch["task_memory"] = pointer
+        return patch
+
+    @staticmethod
+    def _has_thread_identity(ctx: GovernanceContext) -> bool:
+        return bool(_get_runtime_value(ctx.runtime, "thread_id", None))

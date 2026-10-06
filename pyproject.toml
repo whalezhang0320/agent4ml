@@ -26,6 +26,7 @@ agent4ml = "agent4ml.backend.app.cli.main:main"
 agent4ml-ml-api = "agent4ml.backend.app.ml_service.cli:api_main"
 agent4ml-ml-worker = "agent4ml.backend.app.ml_service.cli:worker_main"
 agent4ml-ml-eval = "agent4ml.backend.agents.ml_research.failure_eval:main"
+agent4ml-task-memory-bench = "agent4ml.backend.benchmarks.task_memory_ab:main"
 
 [build-system]
 requires = ["setuptools>=68"]

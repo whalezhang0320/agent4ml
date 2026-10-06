@@ -39,7 +39,7 @@ _CST = timezone(timedelta(hours=8))
 def _resolve_relative_paths(config: AppConfig) -> AppConfig:
     """把 config 里相对路径锚到 _PROJECT_ROOT——与 logs_root 同款处理。
 
-    目前覆盖 ``context_governance.params.externalize_dir``（默认 ``.agent4ml/externalized``）。
+    覆盖上下文治理的外化、快照和任务记忆目录，确保它们不随启动 CWD 漂移。
     之前没锚定，ExternalizerExecutor 直接 ``os.makedirs(self._dir)`` 按进程 CWD 解析——
     用户从 PowerShell 启动 ``agent4ml``（默认 CWD=用户家目录）时，外化文件全部写到了
     ``C:\\Users\\<user>\\.agent4ml\\externalized\\``，与项目目录下的 ``.agent4ml/externalized``
@@ -51,6 +51,14 @@ def _resolve_relative_paths(config: AppConfig) -> AppConfig:
     if not p.is_absolute():
         p = (_PROJECT_ROOT / p).resolve()
     params["externalize_dir"] = str(p)
+    for key, default in (
+        ("snapshot_dir", ".agent4ml/snapshots"),
+        ("task_memory_dir", ".agent4ml/task_memory"),
+    ):
+        configured = Path(params.get(key, default))
+        if not configured.is_absolute():
+            configured = (_PROJECT_ROOT / configured).resolve()
+        params[key] = str(configured)
     # L4 memory.storage_path 锚定 _PROJECT_ROOT（01 D12，与 externalize_dir 同款）
     memory_path = Path(config.memory.storage_path)
     if not memory_path.is_absolute():

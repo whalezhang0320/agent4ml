@@ -110,6 +110,10 @@ def run_chat(provider: str | None = None, model: str | None = None, legacy: bool
 def _build_stream_config(runtime: AppRuntime, run_context: Any) -> dict:
     """构建 graph config（stream 用，与 LeaderAgent.run 一致）。"""
     rc = run_context.config.runtime
+    governance_config = getattr(run_context.config, "context_governance", None)
+    if governance_config is None:
+        governance_config = getattr(getattr(runtime, "config", None), "context_governance", None)
+    governance_params = getattr(governance_config, "params", None) or {}
     return {
         "configurable": {
             "expert_mode": rc.expert_mode,
@@ -119,6 +123,13 @@ def _build_stream_config(runtime: AppRuntime, run_context: Any) -> dict:
             "output_dir": str(run_context.output_dir),
             "plan_enabled": rc.plan_enabled,
             "timezone": rc.timezone,
+            "task_memory_enabled": governance_params.get("task_memory_enabled", True),
+            "task_memory_dir": governance_params.get(
+                "task_memory_dir", ".agent4ml/task_memory"
+            ),
+            "task_memory_read_max_chars": governance_params.get(
+                "task_memory_read_max_chars", 24_000
+            ),
             "model": _resolve_actual_model_name(runtime.capability_registry),
         },
         "recursion_limit": rc.max_loop_steps * rc.graph_node_multiplier,

@@ -39,6 +39,7 @@ AGENT4ML_SUMMARY = "agent4ml.summary"
 AGENT4ML_EXTERNALIZED = "agent4ml.externalized"
 AGENT4ML_EXTERNALIZED_PATH = "agent4ml.externalized_path"
 AGENT4ML_EXTERNALIZED_META = "agent4ml.externalized_meta"
+AGENT4ML_TASK_MEMORY = "agent4ml.task_memory"
 AGENT4ML_COMPACTION_STAGE = "agent4ml.compaction_stage"
 AGENT4ML_TURN_ID = "agent4ml.turn_id"
 
@@ -71,6 +72,10 @@ class ContextAssembler:
         if goal:
             lines.append(f"<goal>{goal}</goal>")
 
+        task_memory = self._render_task_memory(governance)
+        if task_memory:
+            lines.append(task_memory)
+
         plan = self._render_plan(state.get("todos"))
         if plan:
             lines.append(f"<plan>\n{plan}\n</plan>")
@@ -102,6 +107,17 @@ class ContextAssembler:
             return ""
         default = governance.get("default") or {}
         return default.get("summary") or ""
+
+    @staticmethod
+    def _render_task_memory(governance: dict | None) -> str:
+        if not governance:
+            return ""
+        default = governance.get("default") or {}
+        projection = default.get("task_memory_projection") or ""
+        # Only the deterministic projector may supply this internal envelope.
+        if not isinstance(projection, str) or not projection.startswith("<task_memory "):
+            return ""
+        return projection
 
     def _render_reflection(self, state: Mapping[str, Any]) -> str:
         items = state.get("reflection_items") or []

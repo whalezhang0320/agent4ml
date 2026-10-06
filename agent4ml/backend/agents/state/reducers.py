@@ -19,6 +19,7 @@ CORE_FIELDS = {
     "errors",
     "recalled_memories",
     "memory_updates",
+    "task_memory",
 }
 
 MAX_ERRORS = 100
@@ -250,6 +251,31 @@ def merge_sandbox(
     raise ValueError(
         f"Conflicting sandbox state updates: {existing_id!r} != {new_id!r}"
     )
+
+
+def merge_task_memory(
+    existing: dict | None, new: dict | None
+) -> dict | None:
+    """Merge the lightweight task-memory pointer kept in ``ThreadState``.
+
+    The graph itself deliberately stays on disk.  State only carries the stable
+    identity and the latest materialized version so checkpoints do not duplicate
+    the full task graph.  A task id is immutable inside one thread; accepting a
+    different id here would silently create two sources of truth.
+    """
+    if new is None:
+        return existing
+    if existing is None:
+        return dict(new)
+    existing_task = existing.get("task_id")
+    new_task = new.get("task_id")
+    if existing_task and new_task and existing_task != new_task:
+        raise ValueError(
+            f"Conflicting task-memory ids: {existing_task!r} != {new_task!r}"
+        )
+    merged = dict(existing)
+    merged.update(new)
+    return merged
 
 
 def merge_orchestration(

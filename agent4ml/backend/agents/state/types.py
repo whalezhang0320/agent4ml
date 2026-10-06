@@ -18,6 +18,7 @@ from agent4ml.backend.agents.state.reducers import (
     merge_orchestration,
     merge_reflection_items,
     merge_sandbox,
+    merge_task_memory,
     merge_sources,
     merge_tagged_context,
     merge_todos,
@@ -28,6 +29,16 @@ from agent4ml.backend.agents.state.reducers import (
 # merge_governance deep-merge（last-write-wins per leaf key）。
 # 全值可 JSON 序列化（str/int/dict/list），禁 file handle 等不可序列化对象。
 GovernanceState = dict[str, Any]
+
+
+class TaskMemoryState(TypedDict, total=False):
+    """Small pointer to the on-disk task graph; never stores nodes or evidence."""
+
+    task_id: str
+    graph_path: str
+    graph_version: int
+    current_node: str | None
+    status: str
 
 
 class OrchestrationState(TypedDict, total=False):
@@ -163,3 +174,4 @@ class ThreadState(AgentState):
     skill_suggestion: NotRequired[list[dict] | None]
     recalled_memories: Annotated[list | None, merge_memory_recalled]
     memory_updates: Annotated[list | None, merge_memory_updates]
+    task_memory: Annotated[TaskMemoryState | None, merge_task_memory]

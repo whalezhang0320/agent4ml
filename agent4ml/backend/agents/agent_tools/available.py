@@ -12,7 +12,13 @@ logger = logging.getLogger(__name__)
 # core: 基础工具，default + expert 都加载（省上下文）
 # deferred: 深度工具，仅 expert 加载
 # sandbox: 沙箱工具（bash/read_file/write_file/list_dir/str_replace/present_files）
-CORE_TOOL_NAMES: set[str] = {"web_search", "browse_page", "read_snapshot", "skill_search"}
+CORE_TOOL_NAMES: set[str] = {
+    "web_search",
+    "browse_page",
+    "read_snapshot",
+    "task_memory_read",
+    "skill_search",
+}
 SANDBOX_TOOL_NAMES: set[str] = {"bash", "read_file", "write_file", "list_dir", "str_replace", "present_files"}
 
 
@@ -49,7 +55,7 @@ def get_available_tools(
     """加载 builtin 工具，可选按 group 过滤。
 
     MCP 工具由 McpManager 管理（bootstrap 通过 build_mcp_manager 加载），
-    此函数只返 builtin 工具（ddg_search + read_snapshot）。
+    此函数只返 builtin 工具（搜索、快照和当前任务记忆等）。
     sandbox 工具由 bootstrap 注入 CapabilityRegistry，不在此加载。
 
     Args:

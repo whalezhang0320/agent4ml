@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import tempfile
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
@@ -14,7 +16,13 @@ from agent4ml.backend.agents.middlewares.tagged_context_middleware import (
     AGENT4ML_EXTERNALIZED,
     AGENT4ML_EXTERNALIZED_META,
     AGENT4ML_EXTERNALIZED_PATH,
+    AGENT4ML_TASK_MEMORY,
 )
+from agent4ml.backend.agents.task_memory.models import FlushReceipt
+from agent4ml.backend.agents.task_memory.writer import redact_secrets
+
+if TYPE_CHECKING:
+    from agent4ml.backend.agents.context_engineering.contract import MemorySink
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +74,52 @@ class ExternalizerExecutor:
         new_kwargs = {**tool_result.additional_kwargs, AGENT4ML_EXTERNALIZED: True, AGENT4ML_EXTERNALIZED_PATH: path, AGENT4ML_EXTERNALIZED_META: meta}
         return tool_result.model_copy(update={"content": preview, "additional_kwargs": new_kwargs})
 
-    def externalize_history(self, messages: list) -> list[ToolMessage] | None:
+    def rewrite_from_receipt(
+        self, tool_result: ToolMessage, receipt: FlushReceipt
+    ) -> ToolMessage | None:
+        """Attach a commit receipt and shorten only when the size threshold is met."""
+        if not receipt.safe_to_drop or not receipt.result_refs:
+            return None
+        text = self._extract_text(tool_result.content)
+        threshold = self._get_threshold(tool_result.name)
+        message_id = str(tool_result.id) if tool_result.id else None
+        path = (
+            receipt.message_refs.get(message_id)
+            if message_id is not None
+            else None
+        ) or receipt.result_refs[0]
+        should_shorten = len(text) > threshold
+        preview: Any = tool_result.content
+        if should_shorten:
+            preview = redact_secrets(text)[: self._preview_chars] + (
+                f"\n\n[task-memory ref={path} tokens~{len(text) // 4}]"
+            )
+        meta = {
+            "tool_name": tool_result.name or "",
+            "tokens_saved": len(text) // 4,
+            "created_at": datetime.now(CST).isoformat(),
+        }
+        task_meta = {
+            "task_id": receipt.task_id,
+            "graph_version": receipt.graph_version,
+            "event_ids": list(receipt.event_ids),
+            "result_ref": path,
+            "safe_to_drop": True,
+        }
+        new_kwargs = {**tool_result.additional_kwargs, AGENT4ML_TASK_MEMORY: task_meta}
+        if should_shorten:
+            new_kwargs.update({
+                AGENT4ML_EXTERNALIZED: True,
+                AGENT4ML_EXTERNALIZED_PATH: path,
+                AGENT4ML_EXTERNALIZED_META: meta,
+            })
+        return tool_result.model_copy(
+            update={"content": preview, "additional_kwargs": new_kwargs}
+        )
+
+    def externalize_history(
+        self, messages: list, memory_sink: MemorySink | None = None
+    ) -> list[ToolMessage] | None:
         """FIFO 外化：近 exempt_rounds 轮豁免 + 每轮保 1 + 幂等跳过。
 
         返回替换后的 ToolMessage 列表（同 id → add_messages 替换），不含未改消息。
@@ -111,7 +164,11 @@ class ExternalizerExecutor:
 
         rewritten_list: list[ToolMessage] = []
         for _, msg in candidates:
-            rewritten = self.externalize_if_needed(msg)
+            if memory_sink is not None:
+                receipt = memory_sink.flush([msg])
+                rewritten = self.rewrite_from_receipt(msg, receipt)
+            else:
+                rewritten = self.externalize_if_needed(msg)
             if rewritten is not None:
                 rewritten_list.append(rewritten)
                 logger.info("externalize_history: WROTE file for tc=%s", msg.tool_call_id)
@@ -142,7 +199,7 @@ class ExternalizerExecutor:
 
     def _is_externalizable(self, msg: ToolMessage) -> bool:
         text = self._extract_text(msg.content)
-        return len(text) > self._min_chars
+        return len(text) > self._get_threshold(msg.name)
 
     @staticmethod
     def _extract_text(content: Any) -> str:
@@ -166,7 +223,9 @@ class ExternalizerExecutor:
         try:
             os.makedirs(self._dir, exist_ok=True)
             safe_name = (tool_name or "unknown").replace("/", "_").replace("\\", "_")
-            short_id = (tool_call_id or uuid.uuid4().hex)[:12]
+            short_id = re.sub(
+                r"[^A-Za-z0-9_-]", "_", tool_call_id or uuid.uuid4().hex
+            )[:12]
 
             # 尝试解析为 JSON → 格式化缩进存 .json；否则原样存 .txt
             try:
@@ -179,8 +238,21 @@ class ExternalizerExecutor:
 
             filename = f"{safe_name}-{short_id}{ext}"
             filepath = os.path.join(self._dir, filename)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(write_content)
+            fd, temp_path = tempfile.mkstemp(prefix=".externalized-", suffix=".tmp", dir=self._dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(write_content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp_path, filepath)
+                dir_fd = os.open(self._dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            finally:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
             return filepath
         except (OSError, TypeError) as exc:
             logger.error("externalize write failed: %s (tool_call_id=%s)", exc, tool_call_id)

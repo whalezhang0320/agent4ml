@@ -524,6 +524,27 @@ def test_p1_skip_already_externalized(tmp_path) -> None:
     assert "tc_extra" in ids  # 未外化
 
 
+def test_p1_candidate_filter_honors_per_tool_threshold(tmp_path) -> None:
+    ex = ExternalizerExecutor(
+        externalize_dir=str(tmp_path),
+        min_chars=100,
+        exempt_rounds=1,
+        tool_metadata={"web_search": {"typical_output_tokens": 200}},
+    )
+    below = _long_tool("tc_below_adjusted_threshold", "x" * 600)
+    assert ex._is_externalizable(below) is False
+    msgs = [
+        HumanMessage(content="Q0"),
+        below,
+        _long_tool("tc_keep", "x" * 900),
+        HumanMessage(content="Q1"),
+        _long_tool("tc_recent", "x" * 900),
+    ]
+    result = ex.externalize_history(msgs)
+    assert result is None
+    assert not list(tmp_path.iterdir())
+
+
 def test_p1_interval_suppression_skips() -> None:
     """间隔抑制：fraction < p1_skip_until_fraction → P1 跳过。"""
     strategy = DefaultStrategy()

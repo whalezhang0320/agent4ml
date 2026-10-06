@@ -19,4 +19,5 @@ def create_initial_thread_state(user_input: str) -> ThreadState:
         "orchestration": None,
         "recalled_memories": None,
         "memory_updates": None,
+        "task_memory": None,
     }
