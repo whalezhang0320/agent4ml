@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from agent4ml.backend.agents.ml_research.task_store import InMemoryTaskStore
+from agent4ml.backend.agents.ml_research.task_worker import MLTaskWorker
 from agent4ml.backend.app.ml_service.api import create_app, encode_sse
 from agent4ml.backend.app.ml_service.settings import MLServiceSettings
 
@@ -87,3 +88,45 @@ def test_sse_rejects_invalid_replay_cursor(tmp_path):
         response = client.get(f"/v1/tasks/{task_id}/events?after=not-a-stream-id")
 
     assert response.status_code == 400
+
+
+def test_reproduction_and_versioned_approval_over_http(tmp_path):
+    store = InMemoryTaskStore()
+    app = create_app(store=store, settings=_settings(tmp_path))
+    worker = MLTaskWorker(store, worker_id="api-worker")
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/reproductions",
+            json={
+                "name": "paper",
+                "repository_path": str(tmp_path),
+                "training_command": ["python", "train.py"],
+                "resource_limits": {"gpu_count": 1},
+            },
+        )
+        assert created.status_code == 202
+        task_id = created.json()["task_id"]
+        worker.run_once(block_ms=0)
+        worker.run_once(block_ms=0)
+        waiting = client.get(f"/v1/tasks/{task_id}").json()
+
+        stale = client.post(
+            f"/v1/tasks/{task_id}/approve",
+            json={
+                "approval_id": waiting["approval"]["approval_id"],
+                "expected_version": waiting["version"] - 1,
+            },
+        )
+        assert stale.status_code == 409
+
+        approved = client.post(
+            f"/v1/tasks/{task_id}/approve",
+            json={
+                "approval_id": waiting["approval"]["approval_id"],
+                "expected_version": waiting["version"],
+            },
+        )
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "queued"
+        assert approved.json()["nodes"]["run_training"]["attempt"] == 1

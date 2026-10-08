@@ -12,6 +12,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent4ml.backend.agents.ml_research.task_models import (
+    InvalidTaskTransition,
+    StaleTaskVersion,
     TERMINAL_TASK_STATUSES,
     TaskEvent,
     TaskRecord,
@@ -37,6 +39,32 @@ class TaskSubmitRequest(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
+class ReproductionSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    repository_path: str
+    paper_path: str | None = None
+    target_metric: str | None = None
+    resource_limits: dict[str, object] = Field(default_factory=dict)
+    training_command: list[str] | None = Field(default=None, max_length=128)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approval_id: str = Field(min_length=1)
+    expected_version: int = Field(ge=1)
+    resolved_by: str | None = None
+
+
+class RetryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+
+
 class TaskResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -58,6 +86,13 @@ class TaskResponse(BaseModel):
     failure_class: str | None = None
     error: str | None = None
     metadata: dict[str, object] = Field(default_factory=dict)
+    workflow_type: str | None = None
+    workflow_version: int | None = None
+    current_node: str | None = None
+    nodes: dict[str, object] = Field(default_factory=dict)
+    inputs: dict[str, object] = Field(default_factory=dict)
+    artifacts: dict[str, str] = Field(default_factory=dict)
+    approval: dict[str, object] | None = None
 
 
 def _response(task: TaskRecord) -> TaskResponse:
@@ -163,6 +198,26 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return _response(task)
 
+    @app.post(
+        "/v1/reproductions",
+        response_model=TaskResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def submit_reproduction(payload: ReproductionSubmitRequest) -> TaskResponse:
+        try:
+            task = service.submit_reproduction(
+                name=payload.name,
+                repository_path=payload.repository_path,
+                paper_path=payload.paper_path,
+                target_metric=payload.target_metric,
+                resource_limits=payload.resource_limits,
+                training_command=payload.training_command,
+                metadata=payload.metadata,
+            )
+        except TaskValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return _response(task)
+
     @app.get("/v1/tasks/{task_id}", response_model=TaskResponse)
     def get_task(task_id: str) -> TaskResponse:
         try:
@@ -176,6 +231,45 @@ def create_app(
             return _response(service.cancel(task_id))
         except TaskNotFoundError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
+
+    def _approval_action(
+        task_id: str, payload: ApprovalRequest, *, approved: bool
+    ) -> TaskResponse:
+        try:
+            operation = service.approve if approved else service.reject
+            return _response(
+                operation(
+                    task_id,
+                    approval_id=payload.approval_id,
+                    expected_version=payload.expected_version,
+                    resolved_by=payload.resolved_by,
+                )
+            )
+        except TaskNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="task not found") from exc
+        except (StaleTaskVersion, InvalidTaskTransition) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/v1/tasks/{task_id}/approve", response_model=TaskResponse)
+    def approve_task(task_id: str, payload: ApprovalRequest) -> TaskResponse:
+        return _approval_action(task_id, payload, approved=True)
+
+    @app.post("/v1/tasks/{task_id}/reject", response_model=TaskResponse)
+    def reject_task(task_id: str, payload: ApprovalRequest) -> TaskResponse:
+        return _approval_action(task_id, payload, approved=False)
+
+    @app.post("/v1/tasks/{task_id}/retry", response_model=TaskResponse)
+    def retry_task(task_id: str, payload: RetryRequest) -> TaskResponse:
+        try:
+            return _response(
+                service.retry(task_id, expected_version=payload.expected_version)
+            )
+        except TaskNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="task not found") from exc
+        except TaskValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (StaleTaskVersion, InvalidTaskTransition) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/v1/tasks/{task_id}/events")
     async def task_events(

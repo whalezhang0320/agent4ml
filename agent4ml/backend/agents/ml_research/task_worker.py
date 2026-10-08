@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,22 @@ from agent4ml.backend.agents.ml_research.failure_eval import FailureClassifier
 from agent4ml.backend.agents.ml_research.task_models import (
     TERMINAL_TASK_STATUSES,
     InvalidTaskTransition,
+    NodeStatus,
+    QueueMessage,
     TaskRecord,
     TaskStatus,
     utc_now_iso,
 )
 from agent4ml.backend.agents.ml_research.task_store import TaskStore
 from agent4ml.backend.agents.ml_research.tracking import LocalExperimentTracker, METRIC_PREFIX
+from agent4ml.backend.agents.ml_research.workflow import NodeHandler, NodeResult, get_workflow
+from agent4ml.backend.agents.ml_research.workflow_engine import WorkflowEngine
+from agent4ml.backend.agents.ml_research.stages import (
+    AnalyzeCodeHandler,
+    BuildEnvironmentHandler,
+    RunTrainingHandler,
+    ValidateResultHandler,
+)
 
 
 _OUTPUT_EOF = object()
@@ -92,6 +103,7 @@ class MLTaskWorker:
         worker_id: str | None = None,
         heartbeat_interval: float = 5.0,
         cancel_grace_seconds: float = 10.0,
+        handlers: dict[str, NodeHandler] | None = None,
     ) -> None:
         self.store = store
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
@@ -99,6 +111,17 @@ class MLTaskWorker:
         self.cancel_grace_seconds = cancel_grace_seconds
         self._stop = threading.Event()
         self._current_process: subprocess.Popen[str] | None = None
+        self.engine = WorkflowEngine(store)
+        self.handlers: dict[str, NodeHandler] = handlers or {
+            "analyze_code": AnalyzeCodeHandler(),
+            "build_environment": BuildEnvironmentHandler(
+                cancel_requested=store.cancel_requested
+            ),
+            "run_training": RunTrainingHandler(
+                cancel_requested=store.cancel_requested
+            ),
+            "validate_result": ValidateResultHandler(),
+        }
 
     def stop(self) -> None:
         self._stop.set()
@@ -111,7 +134,14 @@ class MLTaskWorker:
         claimed = self.store.claim(self.worker_id, block_ms=block_ms)
         if claimed is None:
             return False
-        message_id, task_id, recovered = claimed
+        if isinstance(claimed, QueueMessage):
+            message = claimed
+        else:  # Compatibility with custom stores implementing the original tuple API.
+            message_id, task_id, recovered = claimed
+            message = QueueMessage(str(message_id), str(task_id), bool(recovered))
+        message_id = message.message_id
+        task_id = message.task_id
+        recovered = message.recovered
         try:
             task = self.store.get(task_id)
             if task is None or task.status in TERMINAL_TASK_STATUSES:
@@ -119,6 +149,9 @@ class MLTaskWorker:
             if task.status is TaskStatus.CANCELLING:
                 self.store.transition(task_id, TaskStatus.CANCELLED)
                 self.store.publish(task_id, "task.cancelled", {"status": "cancelled"})
+                return True
+            if task.is_workflow:
+                self._run_workflow_message(task, message)
                 return True
             if recovered and task.status is TaskStatus.RUNNING:
                 self.store.transition(
@@ -167,6 +200,88 @@ class MLTaskWorker:
             return True
         finally:
             self.store.ack(message_id)
+
+    def _run_workflow_message(
+        self, task: TaskRecord, message: QueueMessage
+    ) -> None:
+        if message.recovered and task.status is TaskStatus.RUNNING:
+            self.engine.recover_expired_claim(task)
+            return
+        decision = self.engine.validate_message(task, message)
+        if decision.is_stale:
+            self.store.publish(
+                task.task_id,
+                "node.skipped",
+                {
+                    "node_id": message.node_id,
+                    "reason": decision.reason,
+                    "expected_version": message.expected_version,
+                },
+            )
+            return
+        assert message.node_id is not None
+        assert message.expected_version is not None
+        assert message.attempt is not None
+        running = self.store.mark_node_running(
+            task.task_id,
+            message.node_id,
+            expected_version=message.expected_version,
+            attempt=message.attempt,
+            worker_id=self.worker_id,
+        )
+        definition = get_workflow(
+            running.workflow_type or "", running.workflow_version or 0
+        ).node(message.node_id)
+        heartbeat_stop = threading.Event()
+
+        def heartbeat() -> None:
+            while not heartbeat_stop.wait(self.heartbeat_interval):
+                try:
+                    self.store.heartbeat_node(
+                        task.task_id, message.message_id, self.worker_id
+                    )
+                except Exception:
+                    return
+
+        heartbeat_thread = threading.Thread(
+            target=heartbeat,
+            name=f"{self.worker_id}-workflow-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        try:
+            handler = self.handlers[definition.handler]
+            result = handler.execute(running, running.nodes[message.node_id])
+        except Exception as exc:
+            result = NodeResult.failed("worker_error", str(exc))
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=max(0.1, self.heartbeat_interval * 2))
+        current = self.store.get(task.task_id)
+        if current is not None and current.status is TaskStatus.CANCELLING:
+            nodes = dict(current.nodes)
+            current_node = nodes[message.node_id]
+            nodes[message.node_id] = replace(
+                current_node,
+                status=NodeStatus.SKIPPED,
+                finished_at=utc_now_iso(),
+                error="task cancelled",
+            )
+            self.store.transition(
+                task.task_id,
+                TaskStatus.CANCELLED,
+                nodes=nodes,
+                worker_id=None,
+                worker_heartbeat_at=None,
+                pid=None,
+            )
+            self.store.publish(
+                task.task_id,
+                "task.cancelled",
+                {"status": "cancelled", "node_id": message.node_id},
+            )
+            return
+        self.engine.apply_result(running, result)
 
     def _execute(self, task: TaskRecord, message_id: str) -> None:
         tracker = LocalExperimentTracker(task.run_dir)

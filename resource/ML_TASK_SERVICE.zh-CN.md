@@ -62,6 +62,50 @@ curl -X POST http://127.0.0.1:8000/v1/tasks/<task_id>/cancel
 Worker 会先终止整个任务进程组，等待宽限期后再强制终止，避免只杀父进程而遗留
 GPU 子进程。排队中的任务会立即进入 `cancelled`。
 
+## 论文复现工作流
+
+`POST /v1/reproductions` 创建固定版本的四节点工作流：
+
+```text
+analyze_code → build_environment → [人工审批] → run_training → validate_result
+```
+
+示例：
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/reproductions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "reproduce-paper",
+    "repository_path": "/absolute/path/under/allowed-root/repository",
+    "paper_path": "/absolute/path/under/allowed-root/paper.pdf",
+    "target_metric": "accuracy",
+    "resource_limits": {"gpu_count": 1},
+    "training_command": ["python", "train.py", "--config", "config.yaml"]
+  }'
+```
+
+训练节点执行前，任务进入 `waiting_approval`。从查询响应读取当前
+`approval.approval_id` 和 `version` 后批准：
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tasks/<task_id>/approve \
+  -H 'Content-Type: application/json' \
+  -d '{"approval_id":"<approval-id>","expected_version":5}'
+```
+
+也可调用 `/reject` 拒绝，或对仍有尝试次数的失败节点调用 `/retry`：
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tasks/<task_id>/retry \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":8}'
+```
+
+审批和重试均使用乐观锁版本；配置已变化时返回 HTTP 409。工作流队列消息包含
+`node_id`、`attempt` 和 `expected_version`，所以重复或过期消息只会被 ACK，不会重复
+执行副作用。节点日志和产物按 `nodes/<node-id>/attempt-<n>/` 保存。
+
 ## 故障 Eval
 
 ```bash
@@ -70,8 +114,8 @@ uv run agent4ml-ml-eval --json
 ```
 
 当前确定性 Eval 覆盖 PyTorch/CUDA OOM、cuDNN allocation failure、pip resolver
-依赖冲突、`pip check` 依赖冲突和普通失败误报控制。检测结果写入任务状态和
-`failure.detected` 事件，但不会自动修改 batch size 或依赖版本。
+依赖冲突、网络超时、配置缺失、语法错误和普通失败误报控制。网络类暂时故障可只重试
+当前节点；OOM 和依赖冲突进入人工审批，不会静默修改 batch size 或依赖版本。
 
 ## 持久化边界
 
@@ -80,5 +124,6 @@ uv run agent4ml-ml-eval --json
 - Checkpoint 和大型 artifact 不应写入 Redis。
 
 Redis Consumer Group 的 pending claim 会由存活 Worker 持续刷新。Worker 丢失后，
-过期 claim 会被新 Worker 回收，并将原任务标记为 `worker_lost`，不会未经确认地重复
-执行训练任务。
+只读或幂等节点重新入队；已有 `external_job_id` 的训练继续对账；提交状态不确定的训练
+进入人工审批，不会未经确认地重复提交。这里保证的是工作流节点级恢复；训练 step/epoch
+级恢复仍要求训练脚本自行保存并加载 checkpoint。

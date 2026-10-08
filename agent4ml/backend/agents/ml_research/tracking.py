@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 METRIC_PREFIX = "AGENT4ML_METRIC "
 TERMINAL_STATUSES = {"success", "failed", "cancelled"}
 
@@ -77,6 +77,11 @@ class LocalExperimentTracker:
         cwd: str | Path | None = None,
         metadata: dict[str, Any] | None = None,
         run_id: str | None = None,
+        workflow_type: str | None = None,
+        workflow_version: int | None = None,
+        node_id: str | None = None,
+        attempt: int | None = None,
+        external_job_id: str | None = None,
     ) -> dict[str, Any]:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
@@ -92,6 +97,11 @@ class LocalExperimentTracker:
             "pid": None,
             "worker_pid": None,
             "exit_code": None,
+            "workflow_type": workflow_type,
+            "workflow_version": workflow_version,
+            "node_id": node_id,
+            "attempt": attempt,
+            "external_job_id": external_job_id,
             "metadata": metadata or {},
         }
         _write_json_atomic(self.manifest_path, manifest)
